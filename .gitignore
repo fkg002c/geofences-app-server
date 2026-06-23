@@ -1,0 +1,9 @@
+# Секретные переменные окружения
+.env
+
+# Логи и кэш Node.js
+node_modules/
+npm-debug.log
+
+# Кэш Docker (если появится)
+.docker_data/
