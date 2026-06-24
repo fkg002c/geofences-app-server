@@ -92,14 +92,25 @@ app.post('/api/messages', authenticateToken, async (req, res) => {
 app.get('/api/messages', authenticateToken, async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT m.id, m.content, m.created_at, u.username as sender
+      SELECT
+        m.id,
+        m.sender_id,
+        m.receiver_id,
+        m.content,
+        m.created_at,
+        u_sender.username as sender_name,
+        u_receiver.username as receiver_name
       FROM messages m
-      JOIN users u ON m.sender_id = u.id
+      LEFT JOIN users u_sender ON m.sender_id = u_sender.id
+      LEFT JOIN users u_receiver ON m.receiver_id = u_receiver.id
+      WHERE m.sender_id = $1 OR m.receiver_id = $1
       ORDER BY m.created_at DESC
-    `);
+    `, [req.user.id]);
+
     res.json(result.rows);
   } catch (err) {
-    res.status(500).json({ error: 'Не удалось получить сообщения.' });
+    console.error(err);
+    res.status(500).json({ error: 'Не удалось получить историю сообщений.' });
   }
 });
 
