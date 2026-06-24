@@ -90,27 +90,73 @@ app.post('/api/messages', authenticateToken, async (req, res) => {
 
 // 4. ПОЛУЧЕНИЕ СПИСКА СООБЩЕНИЙ (Защищенный маршрут)
 app.get('/api/messages', authenticateToken, async (req, res) => {
+  const { chatWith } = req.query; // Получаем ID собеседника из URL, например: /api/messages?chatWith=5
+  const currentUserId = req.user.id;
+
   try {
-    const result = await pool.query(`
-      SELECT
-        m.id,
-        m.sender_id,
-        m.receiver_id,
-        m.content,
-        m.created_at,
-        u_sender.username as sender_name,
-        u_receiver.username as receiver_name
-      FROM messages m
-      LEFT JOIN users u_sender ON m.sender_id = u_sender.id
-      LEFT JOIN users u_receiver ON m.receiver_id = u_receiver.id
-      WHERE m.sender_id = $1 OR m.receiver_id = $1
-      ORDER BY m.created_at DESC
-    `, [req.user.id]);
+    let result;
+
+    if (chatWith) {
+      // История конкретного диалога (я отправил ему ИЛИ он отправил мне)
+      result = await pool.query(`
+        SELECT id, sender_id, receiver_id, content, is_read, created_at
+        FROM messages
+        WHERE (sender_id = $1 AND receiver_id = $2)
+           OR (sender_id = $2 AND receiver_id = $1)
+        ORDER BY created_at ASC
+      `, [currentUserId, chatWith]); // Для чата удобнее старые сообщения сверху (ASC)
+    } else {
+      // Общая история всех сообщений пользователя
+      result = await pool.query(`
+        SELECT id, sender_id, receiver_id, content, is_read, created_at
+        FROM messages
+        WHERE sender_id = $1 OR receiver_id = $1
+        ORDER BY created_at DESC
+      `, [currentUserId]);
+    }
 
     res.json(result.rows);
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Не удалось получить историю сообщений.' });
+    res.status(500).json({ error: 'Не удалось получить сообщения.' });
+  }
+});
+
+// 5. Получение списка пользователей с id
+app.get('/api/users', authenticateToken, async (req, res) => {
+  try {
+    // Выбираем только безопасные поля, исключая текущего пользователя
+    const result = await pool.query(
+      'SELECT id, username FROM users WHERE id != $1 ORDER BY username ASC',
+      [req.user.id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Не удалось получить список пользователей.' });
+  }
+});
+
+// 6. Отметить сообщения от конкретного пользователя как прочитанные
+app.put('/api/messages/read', authenticateToken, async (req, res) => {
+  const { fromUserId } = req.body; // ID того, чьи сообщения мы прочитали
+
+  if (!fromUserId) {
+    return res.status(400).json({ error: 'Укажите ID собеседника.' });
+  }
+
+  try {
+    // Меняем статус на TRUE только для входящих сообщений от этого автора
+    await pool.query(`
+      UPDATE messages
+      SET is_read = TRUE
+      WHERE receiver_id = $1 AND sender_id = $2 AND is_read = FALSE
+    `, [req.user.id, fromUserId]);
+
+    res.json({ success: true, message: 'Сообщения отмечены как прочитанные.' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Не удалось обновить статус сообщений.' });
   }
 });
 
