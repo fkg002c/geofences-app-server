@@ -66,30 +66,23 @@ app.post('/api/login', async (req, res) => {
 
 // 3. ОТПРАВКА СООБЩЕНИЯ (Защищенный маршрут)
 app.post('/api/messages', authenticateToken, async (req, res) => {
-  // Добавляем receiverId в деструктуризацию body
   const { content, receiverId } = req.body;
 
-  // Простая валидация на заполненность полей
   if (!content || !receiverId) {
     return res.status(400).json({ error: 'Заполните текст сообщения и получателя.' });
   }
 
   try {
-    // 1. Проверяем, существует ли получатель в базе данных
-    const userCheck = await pool.query('SELECT id FROM users WHERE id = $1', [receiverId]);
-
-    if (userCheck.rows.length === 0) {
-      return res.status(404).json({ error: 'Получатель с таким ID не найден.' });
-    }
-
-    // 2. Вставляем сообщение с учетом receiver_id
     const result = await pool.query(
       'INSERT INTO messages (sender_id, receiver_id, content) VALUES ($1, $2, $3) RETURNING *',
       [req.user.id, receiverId, content]
     );
-
     res.status(201).json(result.rows[0]);
   } catch (err) {
+    // Код ошибки '23503' в Postgres означает нарушение внешнего ключа (foreign key violation)
+    if (err.code === '23503') {
+      return res.status(404).json({ error: 'Получатель с таким ID не найден.' });
+    }
     console.error(err);
     res.status(500).json({ error: 'Не удалось отправить сообщение.' });
   }
