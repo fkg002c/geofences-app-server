@@ -1,3 +1,4 @@
+require('dotenv').config(); // Обязательно должна быть на самой первой строчке!
 const express = require('express');
 const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
@@ -15,21 +16,21 @@ const pool = new Pool({
   port: process.env.DB_PORT,
 });
 
-const JWT_SECRET = process.env.JWT_SECRET || 'supersecretkey';
-
-// Middleware для проверки JWT токена
+//// Middleware для проверки JWT токена
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
+  const token = authHeader && authHeader.split(' ')[1]; // Извлекаем сам токен после "Bearer "
 
-  if (!token) return res.status(401).json({ error: 'Доступ запрещен. Токен отсутствует.' });
+  if (!token) return res.status(401).json({ error: 'Доступ запрещен' });
 
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ error: 'Невалидный токен.' });
-    req.user = user;
+  jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, user) => {
+    if (err) return res.status(403).json({ error: 'Токен невалиден' });
+    req.user = user; // Теперь в req.user.id лежит ID авторизованного пользователя
     next();
   });
 };
+//function authenticateToken(req, res, next) {
+//};
 
 // 1. РЕГИСТРАЦИЯ ПОЛЬЗОВАТЕЛЯ
 app.post('/api/register', async (req, res) => {
@@ -47,19 +48,48 @@ app.post('/api/register', async (req, res) => {
 });
 
 // 2. АВТОРИЗАЦИЯ (ВХОД)
-app.post('/api/login', async (req, res) => {
-  const { email, password } = req.body;
-  try {
-    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
-    const user = result.rows[0];
+app.post('/api/auth/login', async (req, res) => {
+  const { username, password } = req.body;
 
-    if (!user || !(await bcrypt.compare(password, user.password_hash))) {
-      return res.status(401).json({ error: 'Неверный email или пароль.' });
+  try {
+    // 1. Твоя логика проверки пользователя в БД (пример):
+    const userResult = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
+    const user = userResult.rows[0];
+
+    // [Здесь твоя проверка пароля, например: if (!user || user.password !== password) ...]
+    if (!user) {
+      return res.status(400).json({ error: 'Неверный логин или пароль' });
     }
 
-    const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '1h' });
-    res.json({ token });
+    // Данные, которые будут зашиты внутрь токена
+    const userPayload = { id: user.id, username: user.username };
+
+    // 2. Создаем Access Token (время жизни 15 минут — '15m')
+    const accessToken = jwt.sign(
+      userPayload,
+      process.env.ACCESS_TOKEN_SECRET,
+      { expiresIn: '15m' }
+    );
+
+    // 3. Создаем Refresh Token (время жизни 7 дней — '7d')
+    const refreshToken = jwt.sign(
+      userPayload,
+      process.env.REFRESH_TOKEN_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    // 4. Опционально: Сохраняем refreshToken в базу данных к этому пользователю,
+    // чтобы в будущем его можно было валидировать или отозвать (разлогинить)
+    // await pool.query('UPDATE users SET refresh_token = $1 WHERE id = $2', [refreshToken, user.id]);
+
+    // 5. Отправляем ОБА токена клиенту в формате JSON (это состыкуется с нашей LoginResponse в Android)
+    res.json({
+      accessToken,
+      refreshToken
+    });
+
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: 'Ошибка сервера при авторизации.' });
   }
 });
@@ -160,8 +190,44 @@ app.put('/api/messages/read', authenticateToken, async (req, res) => {
   }
 });
 
+// REFRESH TOKEN
+app.post('/api/auth/refresh', async (req, res) => {
+  const { refreshToken } = req.body;
+
+  if (!refreshToken) {
+    return res.status(401).json({ error: 'Refresh токен отсутствует.' });
+  }
+
+  try {
+    // Проверяем валидность и срок годности Refresh токена
+    jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET, (err, decodedPayload) => {
+      if (err) {
+        return res.status(403).json({ error: 'Refresh токен просрочен или изменен.' });
+      }
+
+      // Если всё ок, генерируем новый чистый Access Token
+      const newAccessPayload = { id: decodedPayload.id, username: decodedPayload.username };
+
+      const newAccessToken = jwt.sign(
+        newAccessPayload,
+        process.env.ACCESS_TOKEN_SECRET,
+        { expiresIn: '15m' }
+      );
+
+      // Отправляем новый токен в Android-приложение (состыкуется с TokenResponse)
+      res.json({ accessToken: newAccessToken });
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Ошибка при обновлении токена.' });
+  }
+});
+
 const PORT = 3000;
 // Важно: биндим к 127.0.0.1
 app.listen(PORT, '0.0.0.0', () => {
+  console.log("Ключ доступа:", process.env.ACCESS_TOKEN_SECRET.slice(0, 7) + "...");
+  console.log("Ключ доступа:", process.env.REFRESH_TOKEN_SECRET.slice(0, 7) + "...");
   console.log(`REST API запущен на порту ${PORT}`);
 });
