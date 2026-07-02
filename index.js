@@ -54,11 +54,16 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     // 1. Твоя логика проверки пользователя в БД (пример):
     const userResult = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
-    const user = userResult.rows[0];
 
-    // [Здесь твоя проверка пароля, например: if (!user || user.password !== password) ...]
-    if (!user) {
-      return res.status(400).json({ error: 'Неверный логин или пароль' });
+    if (userResult.rows.length === 0) {
+      return res.status(401).json({ error: 'Неверный логин или пароль' });
+    }
+
+    const user = userResult.rows[0];
+    const isMatch = await bcrypt.compare(password, user.password_hash);
+
+    if (!isMatch) {
+      return res.status(401).json({ error: 'Неверный логин или пароль' });
     }
 
     // Данные, которые будут зашиты внутрь токена
@@ -84,6 +89,7 @@ app.post('/api/auth/login', async (req, res) => {
 
     // 5. Отправляем ОБА токена клиенту в формате JSON (это состыкуется с нашей LoginResponse в Android)
     res.json({
+      id: user.id,
       accessToken,
       refreshToken
     });
