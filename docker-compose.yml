@@ -1,11 +1,10 @@
 services:
 
-  # Основной диспетчер и менеджер SSL
+  # Main dispatcher and SSL manager
   nginx-proxy-manager:
     image: 'jc21/nginx-proxy-manager:latest'
     container_name: nginx_proxy_manager
     restart: always
-    # restart: unless-stopped
     environment:
       TZ: "Europe/Moscow"
     ports:
@@ -16,7 +15,7 @@ services:
       - ./npm-data/data:/data
       - ./npm-data/letsencrypt:/etc/letsencrypt
 
-  # База данных PostgreSQL
+  # PostgreSQL DB
   postgres:
     image: postgres:16-alpine
     container_name: postgres_db
@@ -29,15 +28,15 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro # Автоматическое создание таблиц
-    # restart: always
-    # Проверка готовности СУБД (Healthcheck)
+    restart: always
+    # Check DB is ready (Healthcheck)
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
       interval: 5s
       timeout: 5s
       retries: 5
 
-  # REST API приложение
+  # REST API application
   node_app:
     image: node:18-alpine
     container_name: rest_api
@@ -50,17 +49,20 @@ services:
       DB_PORT: 5432
       ACCESS_TOKEN_SECRET: ${ACCESS_TOKEN_SECRET}
       REFRESH_TOKEN_SECRET: ${REFRESH_TOKEN_SECRET}
+      FIREBASE_SERVICE_ACCOUNT: ${FIREBASE_SERVICE_ACCOUNT}
+#      FIREBASE_SERVICE_FILE: ${FIREBASE_SERVICE_FILE}
     volumes:
-      - .:/app                                 # Синхронизация вашего исходного кода
-      - /app/node_modules                      # Изоляция папки зависимостей внутри Docker
-    # Установка nodemon на лету и запуск в режиме отслеживания изменений
+      - .:/app                                                                                                   # Source code synchronization
+      - /app/node_modules                                                                                        # Isolating the dependencies folder inside Docker
+#      - ../geofences-chat-app-firebase-adminsdk-fbsvc.json:/app/geofences-chat-app-firebase-adminsdk-fbsvc.json # FIREBASE_SERVICE_FILE mode
+    # Installing nodemon on the fly and running in change-monitoring mode
     command: sh -c "npm install && npm install -g nodemon && nodemon index.js"
-    # API начнет запускаться строго после того, как Postgres поднимет таблицы
+    # API starts after Postgres DB is ready
     depends_on:
       postgres:
         condition: service_healthy
 
-  # Веб-консоль для управления базой данных
+  # Postgres DB WEB console
   pgadmin:
     image: dpage/pgadmin4
     restart: always
