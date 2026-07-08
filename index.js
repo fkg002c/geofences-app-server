@@ -126,7 +126,7 @@ app.post('/api/messages', authenticateToken, async (req, res) => {
     const savedMessage = messageResult.rows[0];
 
     // 2. Looking for the fcm_token (or installationId) of the message RECIPIENT in the users table
-    const userQuery = 'SELECT fcm_token FROM users WHERE id = $1';
+    const userQuery = 'SELECT fcm_token, username FROM users WHERE id = $1';
     const userResult = await pool.query(userQuery, [receiverId]);
     const receiverToken = userResult.rows[0]?.fcm_token;
 
@@ -139,6 +139,7 @@ app.post('/api/messages', authenticateToken, async (req, res) => {
         data: {
           id: String(savedMessage.id),
           senderId: String(savedMessage.sender_id),
+          senderName: String(userResult.rows[0]?.username),
           receiverId: String(savedMessage.receiver_id),
           content: String(savedMessage.content),
           createdAt: String(savedMessage.created_at.toISOString())
@@ -329,8 +330,45 @@ router.post('/api/auth/logout', authenticateToken, async (req, res) => {
 
 const PORT = 3000;
 // Important: bind to 127.0.0.1
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, '0.0.0.0', async () => {
   console.log(" ACCESS_TOKEN_SECRET:", process.env.ACCESS_TOKEN_SECRET.slice(0, 7) + "...");
   console.log("REFRESH_TOKEN_SECRET:", process.env.REFRESH_TOKEN_SECRET.slice(0, 7) + "...");
   console.log(`REST API is running on port ${PORT}`);
+  await sendServerStatusPush('start');
 });
+
+async function sendServerStatusPush(status) {
+  const message = {
+    data: {
+      type: 'SERVER_STATUS',
+      status: status
+    },
+    android: {
+      priority: "high",
+      ttl: status === 'start' ? 60 * 60 * 1000 : 5 * 60 * 1000
+    },
+    topic: 'server_status'
+  };
+
+  await messaging.send(message);
+}
+
+let isShuttingDown = false;
+
+async function handleShutdown(signal) {
+  if (isShuttingDown) {
+    console.log(`Signal ${signal} received. Notifying users...`);
+    return;
+  }
+
+  console.log(`Получен сигнал ${signal}. Оповещаем клиентов...`);
+
+  await sendServerStatusPush('stop');
+
+  console.log("Exit the process.");
+  process.exit(0);
+}
+
+// Listen for stop signals (for example, from PM2, Docker, or pressing Ctrl+C in the terminal)
+process.on('SIGTERM', () => handleShutdown('SIGTERM'));
+process.on('SIGINT', () => handleShutdown('SIGINT'));

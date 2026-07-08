@@ -41,6 +41,8 @@ services:
     image: node:18-alpine
     container_name: rest_api
     working_dir: /app
+    init: true # <--- IMPORTANT: Enables correct forwarding of PID 1 signals
+    stop_grace_period: 30s
     environment:
       DB_HOST: postgres
       DB_USER: ${DB_USER}
@@ -56,7 +58,11 @@ services:
       - /app/node_modules                                                                                        # Isolating the dependencies folder inside Docker
 #      - ../geofences-chat-app-firebase-adminsdk-fbsvc.json:/app/geofences-chat-app-firebase-adminsdk-fbsvc.json # FIREBASE_SERVICE_FILE mode
     # Installing nodemon on the fly and running in change-monitoring mode
-    command: sh -c "npm install && npm install -g nodemon && nodemon index.js"
+#    command: sh -c "npm install && npm install -g nodemon && nodemon index.js"
+    # Running through npx (to avoid clogging the global cache).
+    # Pass the --passthrough-signals flag, and run index.js as an array.
+    #! Run 'docker compose exec node_app npm install' once when package.json changes.
+    command: sh -c "npm install && exec npx nodemon index.js" # npx nodemon index.js  # npx nodemon --passthrough-signals index.js
     # API starts after Postgres DB is ready
     depends_on:
       postgres:

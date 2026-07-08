@@ -1,0 +1,5 @@
+{
+  "signal": "SIGTERM",
+  "watch": ["*.*"],
+  "ext": "js,mjs,cjs,json"
+}
