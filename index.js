@@ -173,9 +173,6 @@ app.post('/api/messages', authenticateToken, async (req, res) => {
   }
 });
 
-module.exports = router;
-
-
 // 4. RECEIVING A LIST OF MESSAGES (Secure Route)
 app.get('/api/messages', authenticateToken, async (req, res) => {
   const { chatWith } = req.query; // Getting the interlocutor's ID from the URL, for example: /api/messages?chatWith=5
@@ -313,7 +310,7 @@ app.post('/api/auth/fcm-token', authenticateToken, async (req, res) => {
 });
 
 // LOGOUT
-router.post('/api/auth/logout', authenticateToken, async (req, res) => {
+app.post('/api/auth/logout', authenticateToken, async (req, res) => {
     const userId = req.user.id;
 
     console.log(`POST /api/auth/logout from userId: ${userId}`);
@@ -335,6 +332,25 @@ app.listen(PORT, '0.0.0.0', async () => {
   console.log("REFRESH_TOKEN_SECRET:", process.env.REFRESH_TOKEN_SECRET.slice(0, 7) + "...");
   console.log(`REST API is running on port ${PORT}`);
   await sendServerStatusPush('start');
+
+    // СКРИПТ ВЫВОДА ВСЕХ ЭНДПОИНТОВ:
+    console.log('\n=== ЗАРЕГИСТРИРОВАННЫЕ ЭНДПОИНТЫ ===');
+    const routes = [];
+    app._router.stack.forEach((middleware) => {
+        if (middleware.route) { // Эндпоинты, зарегистрированные напрямую через app
+            const methods = Object.keys(middleware.route.methods).join(', ').toUpperCase();
+            routes.push({ Метод: methods, Путь: middleware.route.path });
+        } else if (middleware.name === 'router') { // Эндпоинты, подключенные через роутеры
+            middleware.handle.stack.forEach((handler) => {
+                if (handler.route) {
+                    const methods = Object.keys(handler.route.methods).join(', ').toUpperCase();
+                    routes.push({ Метод: methods, Путь: handler.route.path });
+                }
+            });
+        }
+    });
+    console.table(routes);
+    console.log('====================================\n');
 });
 
 async function sendServerStatusPush(status) {
@@ -372,3 +388,5 @@ async function handleShutdown(signal) {
 // Listen for stop signals (for example, from PM2, Docker, or pressing Ctrl+C in the terminal)
 process.on('SIGTERM', () => handleShutdown('SIGTERM'));
 process.on('SIGINT', () => handleShutdown('SIGINT'));
+
+module.exports = router;
