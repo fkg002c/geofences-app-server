@@ -377,6 +377,8 @@ async function handleShutdown(signal) {
     return;
   }
 
+  isShuttingDown = true;
+
   console.log(`Получен сигнал ${signal}. Оповещаем клиентов...`);
 
   await sendServerStatusPush('stop');
