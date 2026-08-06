@@ -1,5 +1,7 @@
 require('dotenv').config(); // It must definitely be on the very first line!
 const express = require('express');
+const http = require('http'); // 1. Добавляем встроенный модуль http
+const WebSocket = require('ws'); // 2. Добавляем ws
 const router = express.Router();
 const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
@@ -8,6 +10,15 @@ const messaging = require('./firebase');
 
 const app = express();
 app.use(express.json());
+
+// 3. Создаем HTTP-сервер, оборачивая наше Express-приложение
+const server = http.createServer(app);
+
+// 4. Инициализируем WS-сервер
+const wss = new WebSocket.Server({ noServer: true });
+// Карта для хранения активных соединений (userId -> ws)
+// Так как ваши ID на клиенте Int, ключом будет число (или строка, JS приведет сам)
+const activeConnections = new Map();
 
 // Configuring a PostgreSQL Connection from Docker Environment Variables
 const pool = new Pool({
@@ -33,6 +44,95 @@ const authenticateToken = (req, res, next) => {
 };
 //function authenticateToken(req, res, next) {
 //};
+
+// --- ВЕРИФИКАЦИЯ И АВТОРИЗАЦИЯ WEBSOCKET ---
+server.on('upgrade', (request, socket, head) => {
+    try {
+        const authHeader = request.headers['authorization'];
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+            socket.destroy();
+            return;
+        }
+
+        const token = authHeader.split(' ')[1];
+
+        // Верифицируем токен тем же секретом, что и в REST API
+        jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
+            if (err) {
+                socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+                socket.destroy();
+                return;
+            }
+
+            // Токен валиден! Передаем управление серверу ws, прокидывая userId (из payload токена)
+            wss.handleUpgrade(request, socket, head, (ws) => {
+                wss.emit('connection', ws, request, decoded.id); // decoded.id - ваш userId
+            });
+        });
+    } catch (error) {
+        socket.write('HTTP/1.1 500 Internal Server Error\r\n\r\n');
+        socket.destroy();
+    }
+});
+
+// --- ОБРАБОТКА ПОДКЛЮЧЕНИЙ WEBSOCKET ---
+wss.on('connection', (ws, request, userId) => {
+    // Сохраняем активное соединение пользователя
+    activeConnections.set(userId, ws);
+    console.log(`Пользователь ${userId} подключился по WebSocket. Всего в сети: ${activeConnections.size}`);
+
+    // Обработка сообщений от Android-клиента (например, ACK-подтверждений)
+    ws.on('message', (messageBuffer) => {
+        try {
+            const messageText = messageBuffer.toString();
+            const data = JSON.parse(messageText);
+
+            if (data.type === 'ACK') {
+                console.log(`Получено подтверждение доставки сообщения ${data.messageId} от пользователя ${userId}`);
+                // Здесь можно обновить статус сообщения в Postgres на "доставлено"
+            }
+        } catch (e) {
+            console.error("Ошибка обработки сообщения из сокета:", e);
+        }
+    });
+
+    // Обработка отключения
+    ws.on('close', () => {
+        activeConnections.delete(userId);
+        console.log(`Пользователь ${userId} отключился. Всего в сети: ${activeConnections.size}`);
+    });
+
+    ws.on('error', (err) => {
+        console.error(`Ошибка сокета для пользователя ${userId}:`, err);
+        activeConnections.delete(userId);
+    });
+});
+
+// --- ФУНКЦИЯ ДЛЯ ОТПРАВКИ СООБЩЕНИЯ (WebSocket + FCM резерв) ---
+// Вызывайте эту функцию в вашем REST-эндпоинте отправки сообщения
+async function sendMessageToUser(recipientId, messagePayload) {
+    const recipientSocket = activeConnections.get(recipientId);
+
+    // Проверяем, открыт ли сокет у получателя
+    if (recipientSocket && recipientSocket.readyState === WebSocket.OPEN) {
+        // Пользователь онлайн -> Шлем мгновенно через сокет
+        recipientSocket.send(JSON.stringify(messagePayload));
+        console.log(`Сообщение отправлено пользователю ${recipientId} через WebSocket`);
+    } else {
+        // Пользователь оффлайн -> Используем ваш существующий метод Firebase
+        console.log(`Пользователь ${recipientId} оффлайн. Отправка через FCM...`);
+        try {
+            // Форматируем под вашу обертку firebase.js
+            await messaging.sendNotification(recipientId, messagePayload);
+        } catch (fcmError) {
+            console.error("Ошибка отправки через FCM:", fcmError);
+        }
+    }
+}
+
+// Экспортируем функцию, чтобы использовать её в файлах роутера (например, messages.js)
+module.exports = { sendMessageToUser };
 
 // 1. USER REGISTRATION
 app.post('/api/register', async (req, res) => {
@@ -125,43 +225,64 @@ app.post('/api/messages', authenticateToken, async (req, res) => {
     const messageResult = await pool.query(insertQuery, [senderId, receiverId, content]);
     const savedMessage = messageResult.rows[0];
 
-    // 2. Looking for the fcm_token (or installationId) of the message RECIPIENT in the users table
-    const userQuery = 'SELECT fcm_token, username FROM users WHERE id = $1';
-    const userResult = await pool.query(userQuery, [receiverId]);
-    const receiverToken = userResult.rows[0]?.fcm_token;
+    // 2. We get the RECEIVER token and the SENDER name in one pass through the database
+    const dataQuery = `
+      SELECT
+        (SELECT fcm_token FROM users WHERE id = $1) as receiver_fcm_token,
+        (SELECT username FROM users WHERE id = $2) as sender_username
+    `;
+    const dataResult = await pool.query(dataQuery, [Number(receiverId), senderId]);
+    const receiverToken = dataResult.rows[0]?.receiver_fcm_token;
+    const senderName = dataResult.rows[0]?.sender_username || "Unknown";
 
-    // 3. If the recipient has a linked token, trying to send a push notification.
-    if (receiverToken) {
+    // СPayload Assembly (all fields are strictly String for Firebase and Gson)
+    const payloadData = {
+      id: String(savedMessage.id),
+      senderId: String(savedMessage.sender_id),
+      senderName: String(senderName), // Now here is the sender's real name!
+      receiverId: String(savedMessage.receiver_id),
+      content: String(savedMessage.content),
+      createdAt: String(savedMessage.created_at.toISOString())
+    };
 
-      // IMPORTANT: All values inside the data object MUST be Strings!
-      // The Firebase Admin SDK will not accept numbers (Int) or dates (Date) directly.
-      const payload = {
-        data: {
-          id: String(savedMessage.id),
-          senderId: String(savedMessage.sender_id),
-          senderName: String(userResult.rows[0]?.username),
-          receiverId: String(savedMessage.receiver_id),
-          content: String(savedMessage.content),
-          createdAt: String(savedMessage.created_at.toISOString())
-        },
-        token: receiverToken
-      };
+    // 3. FIXED: Cast to Number for reliable lookup in Map
+    const numericReceiverId = Number(receiverId);
+    const recipientSocket = activeConnections.get(numericReceiverId);
 
-      console.log("FCM payload:", payload);
+    if (recipientSocket && recipientSocket.readyState === WebSocket.OPEN) {
+        // Recipient online -> send via socket
+        recipientSocket.send(JSON.stringify(payloadData));
+        console.log(`Сообщение ${savedMessage.id} доставлено пользователю ${numericReceiverId} через WebSocket`);
+    } else {
+        // The recipient is offline -> we send via FCM Push
+        console.log(`Пользователь ${numericReceiverId} оффлайн. Отправляем FCM Push...`);
 
-      // Sending a message via Firebase
-      messaging.send(payload)
-        .then((response) => {
-          console.log('Successfully sent push message:', response);
-        })
-        .catch((error) => {
-          console.error('Error sending push message:', error);
-          // If a token is expired or invalid, it's a good practice to reset it
-          // in the database to avoid spamming Firebase with requests.
-          if (error.code === 'messaging/invalid-argument' || error.code === 'messaging/registration-token-not-registered') {
-             pool.query('UPDATE users SET fcm_token = NULL WHERE id = $1', [receiverId]);
-          }
-        });
+        if (receiverToken) {
+          const payload = {
+            data: payloadData,
+            token: receiverToken
+          };
+
+          console.log("FCM payload:", payload);
+
+          // Sending a message via Firebase
+          messaging.send(payload)
+            .then((response) => {
+              console.log('Successfully sent push message:', response);
+            })
+            .catch(async (error) => {
+              console.error('Error sending push message:', error);
+              // FIXED: Safe catch to prevent server crash
+              if (error.code === 'messaging/invalid-argument' || error.code === 'messaging/registration-token-not-registered') {
+                 try {
+                     await pool.query('UPDATE users SET fcm_token = NULL WHERE id = $1', [numericReceiverId]);
+                     console.log(`FCM токен для пользователя ${numericReceiverId} был успешно сброшен.`);
+                 } catch (dbErr) {
+                     console.error('Ошибка при сбросе FCM токена в БД:', dbErr);
+                 }
+              }
+            });
+        }
     }
 
     // 4. We return a successful response to the sender.
@@ -327,7 +448,8 @@ app.post('/api/auth/logout', authenticateToken, async (req, res) => {
 
 const PORT = 3000;
 // Important: bind to 127.0.0.1
-app.listen(PORT, '0.0.0.0', async () => {
+// 5. Важно: Заменяем app.listen на server.listen, параметры '0.0.0.0' остаются прежними
+server.listen(PORT, '0.0.0.0', async () => {
   console.log(" ACCESS_TOKEN_SECRET:", process.env.ACCESS_TOKEN_SECRET.slice(0, 7) + "...");
   console.log("REFRESH_TOKEN_SECRET:", process.env.REFRESH_TOKEN_SECRET.slice(0, 7) + "...");
   console.log(`REST API is running on port ${PORT}`);
